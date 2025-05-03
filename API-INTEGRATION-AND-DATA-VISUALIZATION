@@ -1,0 +1,292 @@
+"""
+Enhanced Weather Dashboard
+-------------------------
+A more robust weather visualization tool with additional features:
+->Wind speed visualization
+->Pressure trends
+->5-day forecast summary
+->Error handling improvements
+"""
+
+# CONFIGURATION
+import requests
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import json
+import os
+import sys
+import time
+from typing import Tuple, List, Dict, Optional
+import pandas as pd
+from dataclasses import dataclass
+
+CONFIG_FILE = "config.json"
+CACHE_FILE = "weather_cache.json"
+CACHE_EXPIRY_HOURS = 3
+
+@dataclass
+class ForecastData:
+    times: List[datetime]
+    temps: List[float]
+    humidities: List[int]
+    descriptions: List[str]
+    wind_speeds: List[float]
+    pressures: List[int]
+    city: str
+
+def load_config() -> dict:
+    """Load or create configuration file with API settings"""
+    if not os.path.exists(CONFIG_FILE):
+        default_config = {
+            "api_key": "your_openweathermap_api_key",
+            "city": "London",
+            "units": "metric",
+            "country_code": ""  # Added new optional field
+        }
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(default_config, f, indent=4)
+        print(f"Created default config. Please update {CONFIG_FILE} with your API key.")
+        sys.exit(1)
+    
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+            # Validate required fields
+            if config.get("api_key") == "your_openweathermap_api_key":
+                print("Error: Please update the API key in config.json")
+                sys.exit(1)
+            return config
+    except json.JSONDecodeError:
+        print("Error: Invalid config file format")
+        sys.exit(1)
+
+# API FETCHING
+def fetch_weather_data(city: str, api_key: str, units: str = 'metric', 
+                      country_code: str = '') -> Optional[dict]:
+    """Fetch weather data with improved error handling and caching"""
+    # Check cache first
+    cached_data = check_cache(city)
+    if cached_data:
+        return cached_data
+    
+    # Build query URL
+    location = f"{city},{country_code}" if country_code else city
+    url = f"http://api.openweathermap.org/data/2.5/forecast?q={location}&appid={api_key}&units={units}"
+    
+    print(f"Requesting fresh weather data for {city}...")
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Save to cache
+        save_to_cache(data, city)
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {str(e)}")
+        return None
+
+def check_cache(city: str) -> Optional[dict]:
+    """Check for valid cached data"""
+    if not os.path.exists(CACHE_FILE):
+        return None
+        
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            cache = json.load(f)
+            if (cache.get('city') == city and 
+                (datetime.now() - datetime.fromisoformat(cache['timestamp'])) < 
+                timedelta(hours=CACHE_EXPIRY_HOURS)):
+                print("Using cached weather data")
+                return cache['data']
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+def save_to_cache(data: dict, city: str):
+    """Save API response to cache"""
+    cache = {
+        'timestamp': datetime.now().isoformat(),
+        'city': city,
+        'data': data
+    }
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+# DATA PROCESSING
+def parse_forecast(data: dict) -> ForecastData:
+    """Enhanced parsing with more weather parameters"""
+    if not data or 'list' not in data:
+        raise ValueError("Invalid weather data format")
+    
+    city = data['city']['name']
+    times, temps, humidities = [], [], []
+    descriptions, wind_speeds, pressures = [], [], []
+    
+    for entry in data.get("list", []):
+        try:
+            dt = datetime.strptime(entry['dt_txt'], "%Y-%m-%d %H:%M:%S")
+            main = entry['main']
+            weather = entry['weather'][0]
+            
+            times.append(dt)
+            temps.append(main['temp'])
+            humidities.append(main['humidity'])
+            descriptions.append(weather['description'])
+            wind_speeds.append(entry['wind']['speed'])
+            pressures.append(main['pressure'])
+        except KeyError as e:
+            print(f"Warning: Missing data in entry - {str(e)}")
+            continue
+    
+    return ForecastData(
+        times=times,
+        temps=temps,
+        humidities=humidities,
+        descriptions=descriptions,
+        wind_speeds=wind_speeds,
+        pressures=pressures,
+        city=city
+    )
+
+def generate_summary(forecast: ForecastData):
+    """Generate a text summary of the forecast"""
+    df = pd.DataFrame({
+        'Date': [d.date() for d in forecast.times],
+        'Time': [d.time() for d in forecast.times],
+        'Temperature': forecast.temps,
+        'Humidity': forecast.humidities,
+        'Conditions': forecast.descriptions
+    })
+    
+    print("\n=== 5-DAY FORECAST SUMMARY ===")
+    print(f"Location: {forecast.city}")
+    print(f"Period: {min(forecast.times)} to {max(forecast.times)}")
+    print(f"Average Temperature: {sum(forecast.temps)/len(forecast.temps):.1f}°C")
+    print(f"Max Temperature: {max(forecast.temps):.1f}°C")
+    print(f"Min Temperature: {min(forecast.temps):.1f}°C\n")
+    
+    # Group by date for daily summary
+    daily = df.groupby('Date').agg({
+        'Temperature': ['min', 'max', 'mean'],
+        'Humidity': 'mean',
+        'Conditions': lambda x: x.mode()[0]
+    })
+    print(daily.round(1))
+
+# DATA VISUALIZATION
+def create_temperature_plot(forecast: ForecastData, save=False):
+    """Enhanced temperature plot with feels-like temp if available"""
+    plt.figure(figsize=(12, 6))
+    sns.lineplot(x=forecast.times, y=forecast.temps, color='crimson', label='Temperature')
+    plt.title(f"Temperature Forecast in {forecast.city}", fontsize=14)
+    plt.xlabel("Date/Time")
+    plt.ylabel("Temperature (°C)")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if save:
+        plt.savefig("temperature_plot.png", dpi=150, bbox_inches='tight')
+    plt.show()
+
+def create_wind_plot(forecast: ForecastData, save=False):
+    """New wind speed visualization"""
+    plt.figure(figsize=(12, 6))
+    plt.plot(forecast.times, forecast.wind_speeds, 
+             marker='o', linestyle='-', color='green')
+    plt.title(f"Wind Speed Forecast in {forecast.city}", fontsize=14)
+    plt.xlabel("Date/Time")
+    plt.ylabel("Wind Speed (m/s)")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if save:
+        plt.savefig("wind_plot.png", dpi=150, bbox_inches='tight')
+    plt.show()
+
+def create_pressure_plot(forecast: ForecastData, save=False):
+    """New atmospheric pressure visualization"""
+    plt.figure(figsize=(12, 6))
+    plt.plot(forecast.times, forecast.pressures, 
+             marker='o', linestyle='-', color='purple')
+    plt.title(f"Atmospheric Pressure in {forecast.city}", fontsize=14)
+    plt.xlabel("Date/Time")
+    plt.ylabel("Pressure (hPa)")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if save:
+        plt.savefig("pressure_plot.png", dpi=150, bbox_inches='tight')
+    plt.show()
+
+# DASHBOARD MENU
+def dashboard_menu():
+    """Enhanced menu with more options"""
+    print("\n=== WEATHER DASHBOARD MENU ===")
+    print("1. Show Temperature Forecast")
+    print("2. Show Humidity Forecast")
+    print("3. Show Wind Speed Forecast")
+    print("4. Show Pressure Trends")
+    print("5. Show Scatter Plot (Temp vs Time)")
+    print("6. Save All Plots")
+    print("7. Show Forecast Summary")
+    print("8. Exit")
+
+# MAIN
+def main():
+    """Main application flow with better error handling"""
+    try:
+        config = load_config()
+        weather_data = fetch_weather_data(
+            city=config['city'],
+            api_key=config['api_key'],
+            units=config['units'],
+            country_code=config.get('country_code', '')
+        )
+        
+        if not weather_data:
+            print("Failed to fetch weather data")
+            sys.exit(1)
+            
+        forecast = parse_forecast(weather_data)
+        
+        while True:
+            dashboard_menu()
+            choice = input("Enter your choice (1-8): ").strip()
+            
+            if choice == '1':
+                create_temperature_plot(forecast)
+            elif choice == '2':
+                create_humidity_plot(forecast)
+            elif choice == '3':
+                create_wind_plot(forecast)
+            elif choice == '4':
+                create_pressure_plot(forecast)
+            elif choice == '5':
+                create_description_scatter(forecast)
+            elif choice == '6':
+                create_temperature_plot(forecast, save=True)
+                create_humidity_plot(forecast, save=True)
+                create_wind_plot(forecast, save=True)
+                create_pressure_plot(forecast, save=True)
+                print("All plots saved to disk.")
+            elif choice == '7':
+                generate_summary(forecast)
+            elif choice == '8':
+                print("Exiting dashboard. Goodbye!")
+                break
+            else:
+                print("Invalid choice. Please enter a number 1-8.")
+                
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
